@@ -662,6 +662,8 @@ body::after{
       <div class="shortcut-item"><span class="shortcut-desc">Archive view</span><span class="kbd">6</span></div>
       <div class="shortcut-item"><span class="shortcut-desc">Bulk mode</span><span class="kbd">B</span></div>
       <div class="shortcut-item"><span class="shortcut-desc">Add bookmark</span><span class="kbd">N</span></div>
+      <div class="shortcut-item"><span class="shortcut-desc">New folder</span><span class="kbd">F</span></div>
+      <div class="shortcut-item"><span class="shortcut-desc">Toggle folder view</span><span class="kbd">V</span></div>
       <div class="shortcut-item"><span class="shortcut-desc">Export JSON</span><span class="kbd">Ctrl+S</span></div>
     </div>
   </div>
@@ -1100,11 +1102,184 @@ function createCard(b){
   return card;
 }
 
+/* ── FOLDER HELPERS ── */
+function getAllFolders(){
+  const fromBMs=new Set(bookmarks.map(b=>pathStr(b.path)));
+  const all=new Set(["Root",...fromBMs,...explicitFolders]);
+  return [...all].sort((a,b)=>a.localeCompare(b));
+}
+
+function createFolder(){
+  const raw=(prompt("New folder name\n(Use  /  to create subfolders, e.g. Dev / Frontend):")||"").trim();
+  if(!raw)return;
+  const key=raw.replace(/\s*\/\s*/g," / ");
+  if(!explicitFolders.includes(key)){explicitFolders.push(key)}
+  persist();renderAll();toast(`Folder "${key}" created`);
+}
+
+function renameFolder(oldKey){
+  const raw=(prompt(`Rename "${oldKey}" to:`,oldKey)||"").trim();
+  if(!raw||raw===oldKey)return;
+  const newKey=raw.replace(/\s*\/\s*/g," / ");
+  // update all bookmarks in this folder
+  bookmarks.forEach(b=>{
+    if(pathStr(b.path)===oldKey){b.path=pathArr(newKey);b.updatedAt=Date.now()}
+  });
+  // update explicit folder list
+  const idx=explicitFolders.indexOf(oldKey);
+  if(idx!==-1)explicitFolders[idx]=newKey;
+  persist();renderAll();toast(`Renamed to "${newKey}"`);
+}
+
+function deleteFolder(key){
+  const bmsInFolder=bookmarks.filter(b=>pathStr(b.path)===key);
+  if(bmsInFolder.length){
+    if(!confirm(`"${key}" has ${bmsInFolder.length} bookmark(s). Move them to Root and delete folder?`))return;
+    bmsInFolder.forEach(b=>{b.path=[];b.updatedAt=Date.now()});
+  }
+  explicitFolders=explicitFolders.filter(f=>f!==key);
+  persist();renderAll();toast(`Folder deleted`);
+}
+
+/* ── FOLDER MANAGER COLUMNS ── */
+function renderFolderColumns(view){
+  const manager=document.createElement("div");manager.className="folder-manager";
+  const folders=getAllFolders();
+
+  // build a map: folderKey → bookmarks[]
+  const map=new Map();
+  folders.forEach(f=>map.set(f,[]));
+  bookmarks.forEach(b=>{
+    const k=pathStr(b.path);
+    if(!map.has(k))map.set(k,[]);
+    map.get(k).push(b);
+  });
+
+  for(const[folderKey,items]of map.entries()){
+    const col=document.createElement("div");col.className="folder-col";col.dataset.folder=folderKey;
+
+    const avg=items.length?Math.round(items.reduce((s,b)=>s+b.score,0)/items.length*10)/10:0;
+    const hdr=document.createElement("div");hdr.className="folder-col-header";
+    hdr.innerHTML=`
+      <div class="folder-col-name">📁 ${esc(folderKey)}</div>
+      <div class="folder-col-meta">${items.length} bookmark${items.length!==1?"s":""}${items.length?" · ★"+avg+" avg":""}</div>
+      <div class="folder-col-acts">
+        <button class="mini-btn btn-rename" title="Rename folder">✏ Rename</button>
+        <button class="mini-btn red btn-delete-folder" title="Delete folder">✕</button>
+      </div>`;
+    hdr.querySelector(".btn-rename").addEventListener("click",e=>{e.stopPropagation();renameFolder(folderKey)});
+    hdr.querySelector(".btn-delete-folder").addEventListener("click",e=>{e.stopPropagation();deleteFolder(folderKey)});
+
+    const body=document.createElement("div");body.className="folder-col-body";
+
+    if(items.length===0){
+      const hint=document.createElement("div");hint.className="folder-drop-hint";
+      hint.textContent="Drop bookmarks here";
+      body.appendChild(hint);
+    } else {
+      sortList(items).forEach(b=>{
+        const row=makeBMRow(b);
+        body.appendChild(row);
+      });
+    }
+
+    // ── Drag-over on column body ──
+    body.addEventListener("dragover",e=>{
+      e.preventDefault();e.dataTransfer.dropEffect="move";
+      col.classList.add("drag-over");body.classList.add("drag-over-body");
+    });
+    body.addEventListener("dragleave",e=>{
+      if(!col.contains(e.relatedTarget)){col.classList.remove("drag-over");body.classList.remove("drag-over-body")}
+    });
+    body.addEventListener("drop",e=>{
+      e.preventDefault();
+      col.classList.remove("drag-over");body.classList.remove("drag-over-body");
+      const id=e.dataTransfer.getData("text/plain");
+      if(!id)return;
+      const bm=bookmarks.find(x=>x.id===id);
+      if(!bm)return;
+      const targetPath=folderKey==="Root"?[]:pathArr(folderKey);
+      if(pathStr(bm.path)===folderKey)return; // no-op
+      bm.path=targetPath;bm.updatedAt=Date.now();
+      persist();renderAll();
+      toast(`Moved to "${folderKey}"`);
+    });
+
+    col.append(hdr,body);
+    manager.appendChild(col);
+  }
+
+  view.appendChild(manager);
+}
+
+function makeBMRow(b){
+  const row=document.createElement("div");row.className="bm-row";
+  row.draggable=true;row.dataset.id=b.id;
+  const favUrl=b.url?`https://www.google.com/s2/favicons?sz=32&domain=${encodeURIComponent(hostname(b.url))}`:"";
+  const favHtml=favUrl?`<img src="${esc(favUrl)}" alt="" onerror="this.style.display='none'">`:`<span>${esc(inferIcon(b))}</span>`;
+  row.innerHTML=`
+    <span class="bm-drag-handle" title="Drag to move">⠿</span>
+    <div class="bm-fav">${favHtml}</div>
+    <div class="bm-row-body">
+      <div class="bm-row-title" title="${esc(b.title)}">${esc(b.title)}</div>
+      <div class="bm-row-url" title="${esc(b.url)}">${esc(hostname(b.url)||b.url)}</div>
+    </div>
+    <span class="bm-row-score">★${b.score}</span>
+    <button class="bm-row-open" title="Open in new tab">↗</button>
+    <button class="bm-row-edit" title="Edit">✏</button>`;
+
+  row.querySelector(".bm-row-open").addEventListener("click",e=>{e.stopPropagation();openBM(b.id)});
+  row.querySelector(".bm-row-edit").addEventListener("click",e=>{e.stopPropagation();openEdit(b.id)});
+
+  // ── Native drag events ──
+  row.addEventListener("dragstart",e=>{
+    dragBMId=b.id;
+    e.dataTransfer.setData("text/plain",b.id);
+    e.dataTransfer.effectAllowed="move";
+    // slight delay so the element doesn't immediately look different in the ghost
+    setTimeout(()=>row.classList.add("dragging"),0);
+  });
+  row.addEventListener("dragend",()=>{
+    row.classList.remove("dragging");dragBMId=null;
+    // clear any lingering drag-over states
+    document.querySelectorAll(".folder-col.drag-over").forEach(c=>c.classList.remove("drag-over"));
+    document.querySelectorAll(".folder-col-body.drag-over-body").forEach(b=>b.classList.remove("drag-over-body"));
+  });
+
+  return row;
+}
+
 /* ── EXPLORER ── */
 function renderExplorer(){
   const view=el.explorerView;view.innerHTML="";
+
+  // ── Toolbar ──
+  const bar=document.createElement("div");bar.className="explorer-bar";
+  bar.innerHTML=`
+    <div class="view-toggle">
+      <button class="vt-btn${explorerMode==="cards"?" active":""}" data-mode="cards">⊞ Cards</button>
+      <button class="vt-btn${explorerMode==="folders"?" active":""}" data-mode="folders">⊟ Folders</button>
+    </div>
+    <div class="eb-spacer"></div>
+    <button class="btn btn-accent" id="newFolderBtn">+ New Folder</button>`;
+  bar.querySelectorAll("[data-mode]").forEach(btn=>{
+    btn.addEventListener("click",()=>{explorerMode=btn.dataset.mode;persist();renderAll()});
+  });
+  bar.querySelector("#newFolderBtn").addEventListener("click",createFolder);
+  view.appendChild(bar);
+
+  if(explorerMode==="folders"){
+    renderFolderColumns(view);
+    return;
+  }
+
+  // ── Card grid mode (original behaviour) ──
   const list=sortList(getFiltered());
-  if(!list.length){view.innerHTML=`<div class="empty">No bookmarks. Import a file or add one manually.</div>`;return}
+  if(!list.length){
+    const emp=document.createElement("div");emp.className="empty";
+    emp.textContent="No bookmarks. Import a file or add one manually.";
+    view.appendChild(emp);return;
+  }
 
   const pinned=list.filter(b=>b.pinned);
   if(pinned.length){
@@ -1367,6 +1542,9 @@ const COMMANDS=[
   {icon:"◆",name:"Queue view",short:"5",action:()=>switchView("queueView")},
   {icon:"◆",name:"Archive view",short:"6",action:()=>switchView("archiveView")},
   {icon:"+",name:"Add bookmark",short:"N",action:addManual},
+  {icon:"📁",name:"New folder",action:createFolder},
+  {icon:"⊟",name:"Switch to Folder Manager",action:()=>{explorerMode="folders";switchView("explorerView");renderAll()}},
+  {icon:"⊞",name:"Switch to Card View",action:()=>{explorerMode="cards";switchView("explorerView");renderAll()}},
   {icon:"↓",name:"Export JSON",short:"Ctrl+S",action:exportJSON},
   {icon:"↓",name:"Export HTML",action:exportHTML},
   {icon:"↓",name:"Export CSV",action:exportCSV},
@@ -1406,8 +1584,9 @@ function renderPalette(q){
 
 /* ── CLEAR ── */
 function clearAll(){
-  localStorage.removeItem(SK);localStorage.removeItem("nvx_archive_v1");localStorage.removeItem(UIK);
-  bookmarks=[];archived=[];selected.clear();renderAll();toast("Data cleared","var(--red)");
+  localStorage.removeItem(SK);localStorage.removeItem("nvx_archive_v1");
+  localStorage.removeItem(UIK);localStorage.removeItem("nvx_folders_v1");
+  bookmarks=[];archived=[];explicitFolders=[];selected.clear();renderAll();toast("Data cleared","var(--red)");
 }
 
 /* ── FILE HANDLER ── */
@@ -1545,6 +1724,11 @@ function setupEvents(){
     if(e.key==="?"){$("shortcutsOverlay").classList.add("show");return}
     if(e.key==="b"||e.key==="B"){toggleBulk();return}
     if(e.key==="n"||e.key==="N"){addManual();return}
+    if(e.key==="f"||e.key==="F"){createFolder();return}
+    if(e.key==="v"||e.key==="V"){
+      explorerMode=explorerMode==="cards"?"folders":"cards";
+      switchView("explorerView");renderAll();return;
+    }
     if(e.key==="1")switchView("explorerView");
     if(e.key==="2")switchView("dashboardView");
     if(e.key==="3")switchView("tagsView");
